@@ -16,20 +16,22 @@
 # License:       		Apache 2.0 - http://www.apache.org/licenses/LICENSE-2.0.html
 #
 
-import xml.dom.minidom
-import webbrowser
-import urlparse
-import urllib2
-import unicodedata
+from optparse import OptionParser
 import cPickle
 import hashlib
-import sys
+import hashlib
 import os
+import sys
 import traceback
-from optparse import OptionParser
+import unicodedata
+import urllib2
+import urlparse
+import webbrowser
+import xml.dom.minidom
 
 API_KEY       = "e224418b91b4af4e8cdb0564716fa9bd"
 SHARED_SECRET = "7cddb9c9716501a0"
+ALL_PHOTOS = 'all_photos'
 
 #
 # Utility functions for dealing with flickr authentication
@@ -42,10 +44,10 @@ def getText(nodelist):
     return rc.encode("utf-8")
 
 def getString(dom, tag):
-    dir = getText(dom.getElementsByTagName(tag)[0].childNodes)
+    str = getText(dom.getElementsByTagName(tag)[0].childNodes)
     # Normalize to ASCII
-    dir = unicodedata.normalize('NFKD', dir.decode("utf-8", "ignore")).encode('ASCII', 'ignore')
-    return dir
+    str = unicodedata.normalize('NFKD', str.decode("utf-8", "ignore")).encode('ASCII', 'ignore')
+    return str
 
 def getTitle(dom):
     return getString(dom, "title")
@@ -169,10 +171,10 @@ def getphoto(id, token, filename):
         # Contruct a request to find the sizes
         url  = "https://api.flickr.com/services/rest/?method=flickr.photos.getSizes"
         url += "&photo_id=" + id
-    
+
         # Sign the request
         url = flickrsign(url, token)
-    
+
         # Make the request
         response = urllib2.urlopen(url)
 
@@ -183,14 +185,13 @@ def getphoto(id, token, filename):
         sizes =  dom.getElementsByTagName("size")
 
         # Grab the original if it exists
-        allowedTags = ("Original", "Video Original", "Large", "Large 2048")
+        allowedTags = ["Original", "Large", "Large 2048", "Video Original"]
         largestLabel = sizes[-1].getAttribute("label")
         #print "%s" % [i.getAttribute("label") for i in sizes]
         if (largestLabel in allowedTags):
-          imgurl = sizes[-1].getAttribute("source")
+            imgurl = sizes[-1].getAttribute("source")
         else:
-          print "Failed to get %s for photo id %s" % (largestLabel, id)
-
+            print "Failed to get %s for photo id %s" % (largestLabel, id)
 
         # Free the DOM memory
         dom.unlink()
@@ -198,15 +199,26 @@ def getphoto(id, token, filename):
         # Grab the image file
         response = urllib2.urlopen(imgurl)
         data = response.read()
-    
+
+        if os.access(filename, os.R_OK):
+            flickr_sum = hashlib.md5(data).hexdigest()
+            file_sum = hashlib.md5(open(filename, 'rb').read()).hexdigest()
+            if flickr_sum == file_sum:
+                print 'refreshing timestamp for %s' % filename
+                os.utime(filename, None)
+                return
+
         # Save the file!
+        if not os.path.isdir(ALL_PHOTOS):
+            os.makedirs(ALL_PHOTOS)
+
+        print "saving photo %s" % filename
         fh = open(filename, "w")
         fh.write(data)
         fh.close()
 
-        return filename
-    except:
-        print "Failed to retrieve photo id " + id
+    except urllib2.URLError, err:
+        print "error downloading %s" % err.reason
 
 def getUser():
     # First things first, see if we have a cached user and auth-token
@@ -240,7 +252,7 @@ def setUrls(setId, urls, config):
 
     # For each set - create a url
     for set in sets:
-        dir = getTitle(set)
+        dir = formatSetDir(set)
 
         # Build the list of photos
         url   = "https://api.flickr.com/services/rest/?method=flickr.photosets.getPhotos"
@@ -277,6 +289,12 @@ def userUrls(userId, tags, urls, config):
     urls.append( (url , '%s - %s' % (username, tags)) )
     return urls
 
+
+def formatSetDir(set):
+    pid = set.getAttribute("id")
+    return '%s - %s' % (getTitle(set), pid)
+
+
 def allUrls(urls, printSets, config):
     # Now, construct a query for the list of photo sets
     url  = "https://api.flickr.com/services/rest/?method=flickr.photosets.getList"
@@ -295,7 +313,7 @@ def allUrls(urls, printSets, config):
     # For each set - create a url
     for set in sets:
         pid = set.getAttribute("id")
-        dir = getTitle(set)
+        dir = formatSetDir(set)
 
         # Build the list of photos
         url   = "https://api.flickr.com/services/rest/?method=flickr.photosets.getPhotos"
@@ -317,12 +335,12 @@ def allUrls(urls, printSets, config):
     # Add the photos which are not in any set
     url   = "https://api.flickr.com/services/rest/?method=flickr.photos.getNotInSet"
     url  += "&extras=original_format,media,last_update"
-    urls.append( (url, "No Set") )
+    urls.append( (url, None) )
 
     # Add the user's Favourites
     url   = "https://api.flickr.com/services/rest/?method=flickr.favorites.getList"
     url  += "&extras=original_format,media,last_update"
-    urls.append( (url, "Favourites") )
+    urls.append( (url, "favorites from others") )
     
     return urls
 
@@ -330,6 +348,7 @@ def getNewPhotos(urls, config):
     # Time to get the photos
     inodes = {}
     newFiles = []
+    maybeUpdatedFiles = []
     for (url , dir) in urls:
         # Create the directory
         try:
@@ -373,37 +392,41 @@ def getNewPhotos(urls, config):
                     extension = ".jpg"
 
                 # The target
-                target = dir + "/" + photoid + extension
+                target = ALL_PHOTOS + "/" + photoid + extension
+                set_target = dir + "/" + photoid + extension if dir else None
+                dirName = dir if dir else ""
 
                 # Record files that exist
                 if os.access(target, os.R_OK):
                     inodes[photoid] = target
+                    maybeLink(target, set_target)
+
                     mtime = os.path.getmtime(target)
-#                    if last_update > int(mtime):
-#                        newFiles.append((photo, target))
-#                        print photo.getAttribute("title").encode("utf8") + " ... updated in set ... " + dir
-#                    else:
-#                        print photo.getAttribute("title").encode("utf8") + " ... not updated in set ... " + dir
+                    if last_update > int(mtime):
+                        maybeUpdatedFiles.append((photo, target, set_target))
+                        print photoid + " ... maybe updated in set ... " + dirName
                 else:
-                    newFiles.append((photo, target))
-                    print photo.getAttribute("title").encode("utf8") + " ... in set ... " + dir
-                
+                    newFiles.append((photo, target, set_target))
+                    print photoid + " ... in set ... " + dirName
+
             # Move on the next page
             page = page + 1
 
-    return (newFiles, inodes)
+
+    downloadPhotos(maybeUpdatedFiles, inodes, config)
+    downloadPhotos(newFiles, inodes, config)
+
+def maybeLink(target, set_target):
+    if set_target and not os.access(set_target, os.R_OK):
+       print "linking photo %s to %s" % (target, set_target)
+       os.link(target, set_target)
 
 def downloadPhotos(newFiles, inodes, config):
-    for (photo, target) in newFiles:
-        # Look it up in our dictionary of inodes first
+    for (photo, target, set_target) in newFiles:
         photoid = photo.getAttribute("id")
-        if photoid in inodes and inodes[photoid] and os.access(inodes[photoid], os.R_OK):
-            # woo, we have it already, use a hard-link
-            print "linking photo %s" % target
-            os.link(inodes[photoid], target)
-        else:
-            print "downloading photo %s" % target
-            inodes[photoid] = getphoto(photo.getAttribute("id"), config["token"], target)
+        getphoto(photo.getAttribute("id"), config["token"], target)
+        inodes[photoid] = target
+        maybeLink(target, set_target)
 
 ######## Main Application ##########
 def main():
@@ -454,9 +477,7 @@ def main():
         if printSets:
             exit(1)
 
-        (newFiles, inodes) = getNewPhotos(urls, config)
-
-        downloadPhotos(newFiles, inodes, config)
+        getNewPhotos(urls, config)
 
     except Exception, e:
         print traceback.format_exc()
