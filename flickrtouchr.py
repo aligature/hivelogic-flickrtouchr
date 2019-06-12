@@ -28,6 +28,7 @@ import urllib2
 import urlparse
 import webbrowser
 import xml.dom.minidom
+import json
 
 API_KEY       = "e224418b91b4af4e8cdb0564716fa9bd"
 SHARED_SECRET = "7cddb9c9716501a0"
@@ -166,7 +167,7 @@ def flickrsign(url, token):
 #
 # Grab the photo from the server
 #
-def getphoto(id, token, filename):
+def getphoto(id, token, filename, config):
     try:
         # Contruct a request to find the sizes
         url  = "https://api.flickr.com/services/rest/?method=flickr.photos.getSizes"
@@ -185,20 +186,55 @@ def getphoto(id, token, filename):
         sizes =  dom.getElementsByTagName("size")
 
         # Grab the original if it exists
-        allowedTags = ["Original", "Large", "Large 2048", "Video Original"]
+        allowedTags = ["Original", "Large", "Large 2048"]
         largestLabel = sizes[-1].getAttribute("label")
         #print "%s" % [i.getAttribute("label") for i in sizes]
+        use_headers = False;
+        imgurl = None
         if (largestLabel in allowedTags):
             imgurl = sizes[-1].getAttribute("source")
+        elif largestLabel == "Video Original":
+            imgurl = 'https://www.flickr.com/video_download.gne?id=%s' % id
+            use_headers = True
         else:
             print "Failed to get %s for photo id %s" % (largestLabel, id)
 
         # Free the DOM memory
         dom.unlink()
 
+        if not imgurl:
+            return False
+
         # Grab the image file
-        response = urllib2.urlopen(imgurl)
-        data = response.read()
+        if use_headers:
+            headers = config['headers']
+        else:
+            headers = {}
+        request = urllib2.Request(imgurl, headers=headers)
+
+        MaxRetries = 50
+        count = 0
+        success = False
+        while count < MaxRetries:
+            print 'downloading %s (%s)' % (filename, count)
+            count += 1
+            response = urllib2.urlopen(request)
+            if response.info().get('Content-Encoding') == 'gzip':
+                buf = StringIO(response.read())
+                f = gzip.GzipFile(fileobj=buf)
+                data = f.read()
+            else:
+                data = response.read()
+
+            expected_length = int(response.headers['content-length'])
+            if len(data) == expected_length:
+                success = True
+                break
+
+            print 'download fail for %s' % filename
+
+        if not success:
+            return False
 
         if os.access(filename, os.R_OK):
             flickr_sum = hashlib.md5(data).hexdigest()
@@ -206,7 +242,7 @@ def getphoto(id, token, filename):
             if flickr_sum == file_sum:
                 print 'refreshing timestamp for %s' % filename
                 os.utime(filename, None)
-                return
+                return True
 
         # Save the file!
         if not os.path.isdir(ALL_PHOTOS):
@@ -216,9 +252,13 @@ def getphoto(id, token, filename):
         fh = open(filename, "w")
         fh.write(data)
         fh.close()
+        return True
 
     except urllib2.URLError, err:
         print "error downloading %s" % err.reason
+        print imgurl
+        print sizes
+        return False
 
 def getUser():
     # First things first, see if we have a cached user and auth-token
@@ -424,9 +464,9 @@ def maybeLink(target, set_target):
 def downloadPhotos(newFiles, inodes, config):
     for (photo, target, set_target) in newFiles:
         photoid = photo.getAttribute("id")
-        getphoto(photo.getAttribute("id"), config["token"], target)
-        inodes[photoid] = target
-        maybeLink(target, set_target)
+        if getphoto(photo.getAttribute("id"), config["token"], target, config):
+            inodes[photoid] = target
+            maybeLink(target, set_target)
 
 ######## Main Application ##########
 def main():
@@ -443,6 +483,8 @@ def main():
             help="directory to save backup")
     parser.add_option("-p", "--print-sets", dest="printSets", action="store_true", default=False,
             help="only print set info")
+    parser.add_option("", "--header-file", dest="header_file", default="download_headers",
+            help="header file for downloads")
     (options, args) = parser.parse_args()
 
     setId = None
@@ -454,14 +496,19 @@ def main():
         setId = options.setid
         userId = options.userid
         tags = options.tags
+
+        header_file = open(options.header_file)
+        headers = json.load(header_file)
+
         os.chdir(destination)
     except Exception, e:
         print type(e).__name__, e
-        print "usage: %s directory" % sys.argv[0] 
+        print "usage: %s -d directory" % sys.argv[0] 
         sys.exit(1)
 
     try:
         config = getUser()
+        config['headers'] = headers
 
         urls = []
 
@@ -486,5 +533,6 @@ def main():
 if __name__ == '__main__':
    try:
       main()
-   except urllib2.URLError:
+   except urllib2.URLError as e:
+      print e
       pass
