@@ -186,18 +186,27 @@ def getphoto(id, token, filename, config):
         sizes =  dom.getElementsByTagName("size")
 
         # Grab the original if it exists
-        allowedTags = ["Original", "Large", "Large 2048"]
-        largestLabel = sizes[-1].getAttribute("label")
-        #print "%s" % [i.getAttribute("label") for i in sizes]
+        allowedTags = ["Video Original", "Original", "Large", "Large 2048"]
+        labels = { size.getAttribute('label'): size for size in sizes }
+
         use_headers = False;
         imgurl = None
-        if (largestLabel in allowedTags):
-            imgurl = sizes[-1].getAttribute("source")
-        elif largestLabel == "Video Original":
+
+        largestLabel = None
+        for tag in allowedTags:
+            if tag in labels:
+                largestLabel = tag
+                break
+
+        if largestLabel == "Video Original":
             imgurl = 'https://www.flickr.com/video_download.gne?id=%s' % id
             use_headers = True
+        elif largestLabel:
+            imgurl = labels[largestLabel].getAttribute("source")
         else:
             print "Failed to get %s for photo id %s" % (largestLabel, id)
+
+        print largestLabel, imgurl
 
         # Free the DOM memory
         dom.unlink()
